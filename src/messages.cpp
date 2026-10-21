@@ -43,6 +43,11 @@ Outcome AppCommandPlayPause(const ResolvedTarget& target) {
 }
 
 Outcome PostSpace(const ResolvedTarget& target) {
+    // Chromium 系根本不读顶层 HWND 队列里的合成键盘消息。这一层又"无法确认"、
+    // 只会乐观报成功，对它们放行的话既没效果，又把第 4 层和失败提示一起饿死。
+    if (IsChromiumWindowClass(target.className)) {
+        return Outcome::Skip(target.exe + L" 是 Chromium 系窗口，投递的键盘消息会被丢弃");
+    }
     const HWND focus = FocusedChildOf(target.hwnd);
     const UINT scan = MapVirtualKeyW(VK_SPACE, MAPVK_VK_TO_VSC);
     const LPARAM down = static_cast<LPARAM>(1 | (scan << 16));

@@ -32,6 +32,7 @@ public:
     /// 注册（或换成）新的组合键。
     /// 失败通常是组合键已被别的程序占用——这是 RegisterHotKey 的固有行为，
     /// 不是 bug，必须把错误暴露给用户，**不要静默吞掉**。
+    /// 失败时原来的热键保持注册，不会落得一个都没有。
     bool Apply(HWND hwnd, const HotkeySpec& spec);
 
     void Clear();
@@ -39,11 +40,15 @@ public:
     bool active() const { return active_; }
     const HotkeySpec& current() const { return current_; }
 
-    /// WM_HOTKEY 消息里的 id，用来区分是不是我们注册的那一个。
-    static constexpr int kId = 1;
+    /// WM_HOTKEY 消息里的 id 是不是我们注册的。换键时新旧两个 id 轮换，所以有两个。
+    static bool IsOurId(WPARAM id) { return id == kIdA || id == kIdB; }
 
 private:
+    static constexpr int kIdA = 1;
+    static constexpr int kIdB = 2;
+
     HWND hwnd_ = nullptr;
+    int id_ = kIdA;
     HotkeySpec current_{};
     bool active_ = false;
 };

@@ -53,6 +53,7 @@ ActionReport TogglePlayPause(const Config& cfg) {
     // 第 1 层：GSMTC。它不依赖窗口句柄，所以即使窗口没解析出来也值得一试。
     bool gsmtcRan = false;
     bool sawSessions = false;
+    Outcome gsmtcOut;
     if (cfg.strategies.gsmtc) {
         gsmtcRan = true;
         std::wstring activity;
@@ -63,6 +64,7 @@ ActionReport TogglePlayPause(const Config& cfg) {
             LogF(L"会话活跃度: %s", activity.c_str());
         }
         Push(&report, L"GSMTC 媒体会话", out);
+        gsmtcOut = out;
         if (out.kind == OutcomeKind::Applied) {
             report.ok = true;
             report.winner = L"GSMTC 媒体会话";
@@ -76,7 +78,12 @@ ActionReport TogglePlayPause(const Config& cfg) {
     if (!hasTarget) {
         if (!cfg.target.Empty()) {
             report.detail = L"没有窗口匹配规则 [" + cfg.target.Describe() + L"]";
-        } else if (gsmtcRan && !sawSessions) {
+        } else if (!gsmtcRan) {
+            report.detail = L"第 1 层（媒体会话）已关闭，又没有设置目标窗口，没有任何一层可用";
+        } else if (gsmtcOut.kind == OutcomeKind::Failed) {
+            // 会话找到了，是它拒绝了请求——原因就在第 1 层的 detail 里，别用别的话盖掉。
+            report.detail = gsmtcOut.detail;
+        } else if (!sawSessions) {
             // 最常见也最容易误导人的一种失败：播放器根本没注册媒体会话
             // （标签页被浏览器丢弃、视频被静音、或者压根没在播）。
             // 这时说"尚未设置目标窗口"是答非所问，会让人以为程序坏了。

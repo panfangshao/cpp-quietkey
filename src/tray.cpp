@@ -49,16 +49,20 @@ void Tray::Destroy() {
     }
 }
 
-void Tray::Readd() {
+bool Tray::Readd() {
     if (data_.hWnd == nullptr) {
-        return;
+        return false;
     }
+    // TaskbarCreated 意味着旧图标已随旧托盘区一起消失，无论 added_ 是什么都要重新加。
     added_ = false;
-    if (Shell_NotifyIconW(NIM_ADD, &data_)) {
-        added_ = true;
-        Shell_NotifyIconW(NIM_SETVERSION, &data_);
-        LogF(L"资源管理器重启，托盘图标已重新添加");
+    if (!Shell_NotifyIconW(NIM_ADD, &data_)) {
+        return false;
     }
+    added_ = true;
+    data_.uVersion = NOTIFYICON_VERSION_4;
+    Shell_NotifyIconW(NIM_SETVERSION, &data_);
+    LogF(L"托盘图标已添加");
+    return true;
 }
 
 void Tray::ShowContextMenu(HWND hwnd, POINT pt) {
@@ -81,10 +85,11 @@ void Tray::ShowContextMenu(HWND hwnd, POINT pt) {
 }
 
 void Tray::SetTooltip(const wchar_t* tooltip) {
+    // 图标暂时不在（启动时添加失败、资源管理器重启中）也先记下，Readd 时带上。
+    wcsncpy_s(data_.szTip, tooltip, _TRUNCATE);
     if (!added_) {
         return;
     }
-    wcsncpy_s(data_.szTip, tooltip, _TRUNCATE);
     NOTIFYICONDATAW n = data_;
     n.uFlags = NIF_TIP | NIF_SHOWTIP;
     Shell_NotifyIconW(NIM_MODIFY, &n);

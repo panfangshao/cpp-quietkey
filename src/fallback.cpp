@@ -26,6 +26,11 @@ std::wstring Truncate(const std::wstring& s, size_t maxChars) {
 }  // namespace
 
 Outcome FocusAndSendSpace(const ResolvedTarget& target, unsigned settleMs) {
+    // 先等用户松开热键里的修饰键：否则目标收到的是 Alt+Space（系统菜单）之类。
+    // 放在切前台之前等，不会延长屏幕"闪"的时间。等不到的话 SendKeyToForeground
+    // 会自己合成抬起。
+    WaitModifiersReleased(500);
+
     // 先记下"我是从哪儿按的热键"，这才是待会要还原的窗口。
     const HWND origin = GetForegroundHwnd();
 
@@ -36,7 +41,13 @@ Outcome FocusAndSendSpace(const ResolvedTarget& target, unsigned settleMs) {
                    : Outcome::Failed(L"SendInput 失败");
     }
 
+    // ForceForeground 会把最小化的窗口还原出来；记下原状，用完再缩回去，
+    // 否则视频窗口从此摊在屏幕上。
+    const bool wasMinimized = IsIconic(target.hwnd) != FALSE;
     if (!ForceForeground(target.hwnd)) {
+        if (wasMinimized) {
+            ShowWindow(target.hwnd, SW_SHOWMINNOACTIVE);
+        }
         return Outcome::Failed(L"无法把 " + target.exe + L" 切到前台");
     }
     const unsigned settle = settleMs > 500 ? 500 : settleMs;
@@ -45,9 +56,12 @@ Outcome FocusAndSendSpace(const ResolvedTarget& target, unsigned settleMs) {
     const bool sent = SendKeyToForeground(VK_SPACE);
 
     // 无论按键是否发成功，都必须把焦点还回去，否则用户会卡在视频窗口里。
+    Sleep(settle);
+    if (wasMinimized) {
+        ShowWindow(target.hwnd, SW_SHOWMINNOACTIVE);
+    }
     bool restored = false;
     if (origin && IsWindow(origin)) {
-        Sleep(settle);
         restored = ForceForeground(origin);
     }
 

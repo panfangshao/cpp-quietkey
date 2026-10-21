@@ -19,8 +19,9 @@ public:
     bool Create(HWND hwnd, UINT callbackMsg, HICON icon, const wchar_t* tooltip);
     void Destroy();
 
-    /// 资源管理器重启后重新添加图标。
-    void Readd();
+    /// 重新添加图标：资源管理器重启后，或启动时 Create 失败后的重试。
+    /// 已经在托盘里就直接返回 true。
+    bool Readd();
 
     /// 在鼠标位置弹出右键菜单。菜单项 ID 见 resource.h。
     void ShowContextMenu(HWND hwnd, POINT pt);
