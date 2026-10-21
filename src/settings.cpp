@@ -17,6 +17,10 @@ Config* g_cfg = nullptr;
 void (*g_onApply)(const Config&) = nullptr;
 ActionReport g_lastReport;
 bool g_hasReport = false;
+// 界面上选中的目标窗口（草稿）。和其他设置一样等「保存并应用」才写回配置并落盘——
+// 以前是选完立即改内存里的配置却不落盘，关窗后看着生效、重启就丢。
+TargetSpec g_draftTarget;
+std::wstring g_defaultHotkeyHint;  // 资源里写的热键说明，含 Win 键提示切换时要还原
 
 // ---- 热键控件与 MOD_* 的互转 ----
 // msctls_hotkey32 用的是 HOTKEYF_*，和 RegisterHotKey 的 MOD_* 不是一套值。
@@ -165,10 +169,18 @@ INT_PTR CALLBACK PickerProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM lParam) {
 
 void LoadIntoControls(HWND dlg) {
     HotkeySpec spec;
-    if (ParseHotkey(g_cfg->hotkey, &spec)) {
-        SendDlgItemMessageW(dlg, IDC_HOTKEY, HKM_SETHOTKEY, SpecToHotkeyCtrl(spec), 0);
+    const bool parsed = ParseHotkey(g_cfg->hotkey, &spec);
+    SendDlgItemMessageW(dlg, IDC_HOTKEY, HKM_SETHOTKEY, parsed ? SpecToHotkeyCtrl(spec) : 0, 0);
+    if (parsed && (spec.modifiers & MOD_WIN)) {
+        // 控件显示不出 Win 键，至少说清楚：不动它就会原样保留。
+        SetText(dlg, IDC_HOTKEY_HINT,
+                L"当前热键是 " + FormatHotkey(spec) +
+                    L"（控件显示不了 Win 键）。不改动这里，保存时会原样保留。");
+    } else {
+        SetText(dlg, IDC_HOTKEY_HINT, g_defaultHotkeyHint);
     }
-    SetText(dlg, IDC_TARGET_TEXT, g_cfg->target.Describe());
+    g_draftTarget = g_cfg->target;
+    SetText(dlg, IDC_TARGET_TEXT, g_draftTarget.Describe());
     Check(dlg, IDC_S_GSMTC, g_cfg->strategies.gsmtc);
     Check(dlg, IDC_S_FOLLOW, g_cfg->followRecentSession);
     Check(dlg, IDC_S_APPCOMMAND, g_cfg->strategies.appcommand);
@@ -198,15 +210,25 @@ bool CollectFromControls(HWND dlg, Config* draft) {
     *draft = *g_cfg;
 
     const WORD raw = static_cast<WORD>(SendDlgItemMessageW(dlg, IDC_HOTKEY, HKM_GETHOTKEY, 0, 0));
-    const HotkeySpec spec = HotkeyCtrlToSpec(raw);
-    if (spec.vk == 0 || spec.modifiers == 0) {
-        MessageBoxW(dlg,
-                    L"热键必须带至少一个修饰键（Ctrl / Alt / Shift）。\n"
-                    L"不带修饰键会把那个键从整个系统里抢走。",
-                    L"quietkey", MB_OK | MB_ICONWARNING);
-        return false;
+    draft->target = g_draftTarget;
+
+    // 配置里手写的 Win 组合：控件里只显示得出去掉 Win 之后的部分。
+    // 用户没动控件就保留原值，否则改任何别的设置一保存，Win 就被悄悄丢掉了。
+    HotkeySpec orig;
+    if (ParseHotkey(g_cfg->hotkey, &orig) && (orig.modifiers & MOD_WIN) &&
+        raw == SpecToHotkeyCtrl(orig)) {
+        draft->hotkey = g_cfg->hotkey;
+    } else {
+        const HotkeySpec spec = HotkeyCtrlToSpec(raw);
+        if (spec.vk == 0 || spec.modifiers == 0) {
+            MessageBoxW(dlg,
+                        L"热键必须带至少一个修饰键（Ctrl / Alt / Shift）。\n"
+                        L"不带修饰键会把那个键从整个系统里抢走。",
+                        L"quietkey", MB_OK | MB_ICONWARNING);
+            return false;
+        }
+        draft->hotkey = FormatHotkey(spec);
     }
-    draft->hotkey = FormatHotkey(spec);
 
     draft->strategies.gsmtc = IsChecked(dlg, IDC_S_GSMTC);
     draft->followRecentSession = IsChecked(dlg, IDC_S_FOLLOW);
@@ -279,8 +301,9 @@ void DoPickTarget(HWND dlg) {
     if (r != IDOK) {
         return;
     }
-    g_cfg->target = st.picked;   // 目标窗口是即时生效的，不等「保存并应用」
-    SetText(dlg, IDC_TARGET_TEXT, g_cfg->target.Describe());
+    // 先进草稿：「立即测试一次」马上能用上它，「保存并应用」才真正写回并落盘。
+    g_draftTarget = st.picked;
+    SetText(dlg, IDC_TARGET_TEXT, g_draftTarget.Describe() + L"（未保存）");
 }
 
 void DoTestOnce(HWND dlg) {
@@ -302,17 +325,30 @@ void DoApply(HWND dlg) {
     if (g_onApply) {
         g_onApply(draft);
     }
+    // onApply 可能改回了配置（例如新热键挂不上、退回旧的），界面要跟着显示真实状态。
+    LoadIntoControls(dlg);
     SettingsRefreshStatus();
 }
 
 INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM) {
     switch (msg) {
-        case WM_INITDIALOG:
+        case WM_INITDIALOG: {
             g_dlg = dlg;
+            g_defaultHotkeyHint = GetText(dlg, IDC_HOTKEY_HINT);
+            // 有了任务栏按钮（见 app.rc 的 WS_EX_APPWINDOW），就得给它一个图标。
+            const HINSTANCE inst =
+                reinterpret_cast<HINSTANCE>(GetWindowLongPtrW(dlg, GWLP_HINSTANCE));
+            HICON small = nullptr;
+            HICON big = nullptr;
+            LoadIconMetric(inst, MAKEINTRESOURCEW(IDI_APP), LIM_SMALL, &small);
+            LoadIconMetric(inst, MAKEINTRESOURCEW(IDI_APP), LIM_LARGE, &big);
+            SendMessageW(dlg, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(small));
+            SendMessageW(dlg, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
             LoadIntoControls(dlg);
             ShowLastReport(dlg);
             SetText(dlg, IDC_STATUS, AppStatusLine());
             return TRUE;
+        }
 
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
@@ -321,8 +357,8 @@ INT_PTR CALLBACK SettingsProc(HWND dlg, UINT msg, WPARAM wParam, LPARAM) {
                 case IDCANCEL:          ShowWindow(dlg, SW_HIDE); return TRUE;
                 case IDC_TARGET_PICK:   DoPickTarget(dlg); return TRUE;
                 case IDC_TARGET_CLEAR:
-                    g_cfg->target = TargetSpec{};
-                    SetText(dlg, IDC_TARGET_TEXT, g_cfg->target.Describe());
+                    g_draftTarget = TargetSpec{};
+                    SetText(dlg, IDC_TARGET_TEXT, g_draftTarget.Describe() + L"（未保存）");
                     return TRUE;
                 case IDC_TEST_ONCE:     DoTestOnce(dlg); return TRUE;
                 case IDC_REFRESH_SESSIONS: ShowSessions(dlg); return TRUE;
@@ -362,6 +398,15 @@ void ShowSettingsDialog(HINSTANCE instance, HWND owner, Config* cfg,
             LogF(L"创建设置对话框失败（错误码 %lu）", GetLastError());
             return;
         }
+    } else if (!IsWindowVisible(g_dlg)) {
+        // 关窗只是隐藏，WM_INITDIALOG 不会再来。重新打开时要按当前配置重填：
+        // 否则显示的是上次没保存的草稿，自启勾选框也不是注册表里的真实状态。
+        LoadIntoControls(g_dlg);
+        ShowLastReport(g_dlg);
+        SetText(g_dlg, IDC_STATUS, AppStatusLine());
+    }
+    if (IsIconic(g_dlg)) {
+        ShowWindow(g_dlg, SW_RESTORE);
     }
     ShowWindow(g_dlg, SW_SHOW);
     SetForegroundWindow(g_dlg);

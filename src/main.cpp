@@ -2,8 +2,8 @@
 //
 // 进程结构刻意简单：**只有一个线程**，一个隐藏窗口 + 一条消息循环。
 // 界面是原生对话框、动作是消息循环里的一次同步调用，不存在"界面框架的重绘节奏"
-// 这种约束。策略链最慢的一层是 SendMessageTimeoutW（上限 120ms），
-// 期间界面短暂无响应可以接受——何况平时窗口根本不显示。
+// 这种约束。策略链里每一步阻塞调用都有上限（媒体会话单步 ≤1.5s 超时、
+// SendMessageTimeoutW 120ms），期间界面短暂无响应可以接受——何况平时窗口根本不显示。
 
 #include <windows.h>
 #include <commctrl.h>
@@ -27,6 +27,12 @@ namespace {
 // 托盘鼠标事件回传用的自定义消息号。
 constexpr UINT WM_TRAY_CALLBACK = WM_APP + 1;
 
+// 托盘图标添加失败后的重试定时器。开机自启时资源管理器常常还没就绪，
+// Shell_NotifyIcon 会失败；之后不一定还会收到 TaskbarCreated，所以自己轮询。
+constexpr UINT_PTR kTrayRetryTimer = 1;
+constexpr UINT kTrayRetryIntervalMs = 2000;
+constexpr int kTrayRetryMax = 60;  // 最多重试两分钟，之后只靠 TaskbarCreated
+
 constexpr wchar_t kWindowClass[] = L"QuietkeyMainWindow";
 constexpr wchar_t kAppName[] = L"quietkey";
 // 单实例互斥体。第二个实例注册热键必定失败，与其让用户对着一个
@@ -40,29 +46,35 @@ struct App {
     HotkeyRegistration hotkey;
     Config cfg;
     unsigned triggerCount = 0;
+    int trayRetries = 0;
 };
 
 App g_app;
 
-void ApplyHotkeyFromConfig(bool notifyOnFailure) {
+/// 按 g_app.cfg.hotkey 注册热键，返回是否成功。
+/// 失败时原来已注册的热键保持不动（见 HotkeyRegistration::Apply）。
+bool ApplyHotkeyFromConfig(bool notifyOnFailure) {
     HotkeySpec spec;
     if (!ParseHotkey(g_app.cfg.hotkey, &spec)) {
         LogF(L"配置里的热键 \"%s\" 无法解析", g_app.cfg.hotkey.c_str());
         if (notifyOnFailure) {
             g_app.tray.Balloon(kAppName, L"配置里的热键写法无法识别，请在设置里重新录一个。");
         }
-        return;
+        return false;
     }
     if (!g_app.hotkey.Apply(g_app.hwnd, spec)) {
         // 组合键被别的程序占用是 RegisterHotKey 的固有行为，不是 bug。
         // 必须把错误暴露给用户，**不要静默吞掉**。
-        const std::wstring msg = L"热键 " + FormatHotkey(spec) +
-                                 L" 注册失败，多半已被其他程序占用。\n程序仍在托盘运行，"
-                                 L"可以在设置里换一个组合键。";
+        std::wstring msg = L"热键 " + FormatHotkey(spec) + L" 注册失败，多半已被其他程序占用。\n";
+        msg += g_app.hotkey.active()
+                   ? L"仍在使用原来的 " + FormatHotkey(g_app.hotkey.current()) + L"。"
+                   : std::wstring(L"程序仍在托盘运行，可以在设置里换一个组合键。");
         if (notifyOnFailure) {
             g_app.tray.Balloon(kAppName, msg.c_str());
         }
+        return false;
     }
+    return true;
 }
 
 /// 托盘悬停提示：把「热键 + 已触发次数」摆出来，悬停一下就知道它还活着。
@@ -99,11 +111,15 @@ void TriggerToggle() {
 }
 
 void OpenSettings() {
-    ShowSettingsDialog(g_app.instance, g_app.hwnd, &g_app.cfg, [](const Config& cfg) {
+    ShowSettingsDialog(g_app.instance, g_app.hwnd, &g_app.cfg, [](const Config&) {
         // 「保存并应用」：先重挂热键，再落盘。
-        ApplyHotkeyFromConfig(true);
+        if (!ApplyHotkeyFromConfig(true) && g_app.hotkey.active()) {
+            // 新组合键挂不上、旧的还在用：配置里也写回旧的。
+            // 否则落盘的是一个挂不上的热键，下次启动就一个热键都没有。
+            g_app.cfg.hotkey = FormatHotkey(g_app.hotkey.current());
+        }
         RefreshTrayTooltip();
-        if (!cfg.Save()) {
+        if (!g_app.cfg.Save()) {
             MessageBoxW(nullptr, L"配置写入失败，改动只在本次运行有效。", kAppName,
                         MB_OK | MB_ICONWARNING);
         }
@@ -131,7 +147,7 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_HOTKEY:
-            if (static_cast<int>(wParam) == HotkeyRegistration::kId) {
+            if (HotkeyRegistration::IsOurId(wParam)) {
                 TriggerToggle();
             }
             return 0;
@@ -145,7 +161,26 @@ LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
 
+        case WM_TIMER:
+            if (wParam == kTrayRetryTimer) {
+                if (g_app.tray.Readd()) {
+                    KillTimer(hwnd, kTrayRetryTimer);
+                    // 启动时热键若注册失败，那会儿托盘不在、气泡发不出去。
+                    // 现在图标有了，再试一次，失败就能如实告诉用户。
+                    if (!g_app.hotkey.active()) {
+                        ApplyHotkeyFromConfig(true);
+                    }
+                    RefreshTrayTooltip();
+                } else if (++g_app.trayRetries >= kTrayRetryMax) {
+                    KillTimer(hwnd, kTrayRetryTimer);
+                    LogF(L"托盘图标多次添加失败，改为等待资源管理器的 TaskbarCreated 广播");
+                }
+                return 0;
+            }
+            break;
+
         case WM_DESTROY:
+            KillTimer(hwnd, kTrayRetryTimer);
             g_app.hotkey.Clear();
             g_app.tray.Destroy();
             PostQuitMessage(0);
@@ -295,10 +330,17 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
         return 1;
     }
 
-    HICON icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP));
+    // 托盘要的是当前 DPI 下的小图标尺寸。LoadIconW 固定给 32px，
+    // 系统再缩到 16/20/24px，高分屏上发糊。
+    HICON icon = nullptr;
+    if (FAILED(LoadIconMetric(instance, MAKEINTRESOURCEW(IDI_APP), LIM_SMALL, &icon))) {
+        icon = LoadIconW(instance, MAKEINTRESOURCEW(IDI_APP));
+    }
     if (!g_app.tray.Create(g_app.hwnd, WM_TRAY_CALLBACK, icon, L"quietkey — 后台播放/暂停")) {
-        MessageBoxW(nullptr, L"托盘图标创建失败，程序无法常驻。", kAppName, MB_OK | MB_ICONERROR);
-        return 1;
+        // 开机自启时资源管理器往往还没就绪，这里失败是常态，不能就此退出——
+        // 热键照常工作，图标稍后由定时器 / TaskbarCreated 补上。
+        LogF(L"托盘图标暂时添加失败，稍后重试");
+        SetTimer(g_app.hwnd, kTrayRetryTimer, kTrayRetryIntervalMs, nullptr);
     }
 
     ApplyHotkeyFromConfig(true);
@@ -306,7 +348,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
     // 第一次运行（还没有配置文件）就把设置界面摆出来，
     // 否则用户只看到一个托盘图标，不知道该干什么。
+    // 同时把默认配置落盘：否则用户不点「保存」直接关窗，
+    // 之后每次启动（包括开机自启）都会再弹一次。
     if (GetFileAttributesW(ConfigPath().c_str()) == INVALID_FILE_ATTRIBUTES) {
+        g_app.cfg.Save();
         OpenSettings();
     }
 

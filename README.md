@@ -347,11 +347,14 @@ PowerShell 里要用得绕一圈（把 bat 的环境变量导出来再逐个 `$e
 
 「无依赖、单文件」的说法，对 CMake 版是打折扣的：拷到一台没装过 VC++ 可再发行组件的干净 Windows 上，它会报「找不到 VCRUNTIME140.dll」。你现在这台机器装过，所以没暴露出来。
 
-手工版那 642 KB 才是真正拷到任何 Win10/11 上双击就能跑的。想让 `build.bat` 也这样，在 `CMakeLists.txt` 里加一行就行：
+手工版那 642 KB 才是真正拷到任何 Win10/11 上双击就能跑的。
 
-```cmake
-set_property(TARGET quietkey PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
-```
+> **现状：** `CMakeLists.txt` 已经加上了下面这行，`build.bat` 产出的 exe 同样不依赖 VC 运行时
+> （Debug 配置用调试版 `/MTd`），上表的 `/MD` 那一行只是当时的记录。
+>
+> ```cmake
+> set_property(TARGET quietkey PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+> ```
 
 ---
 
@@ -557,6 +560,8 @@ quietkey/
 ├── CLAUDE.md              设计依据与踩过的坑，改代码前该看的文件
 ├── tools/
 │   └── make_icon.cpp      构建期程序化生成多尺寸 .ico，不在仓库放二进制资源
+├── tests/
+│   └── test_main.cpp      纯函数单元测试（热键互转、最近活跃），build\quietkey_tests.exe
 └── src/
     ├── main.cpp           入口、隐藏窗口、消息循环、单实例、命令行诊断
     ├── app.rc             图标、manifest、版本信息、两个对话框模板

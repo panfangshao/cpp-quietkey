@@ -65,8 +65,9 @@ UINT ParseKey(const std::wstring& lower) {
     }
     // F1~F24
     if (k.size() >= 2 && k[0] == L'f') {
-        int n = _wtoi(k.c_str() + 1);
-        if (n >= 1 && n <= 24) {
+        wchar_t* end = nullptr;
+        const long n = wcstol(k.c_str() + 1, &end, 10);
+        if (end && *end == L'\0' && n >= 1 && n <= 24) {
             return static_cast<UINT>(VK_F1 + (n - 1));
         }
     }
@@ -84,6 +85,15 @@ UINT ParseKey(const std::wstring& lower) {
     if (k == L"down") return VK_DOWN;
     if (k == L"left") return VK_LEFT;
     if (k == L"right") return VK_RIGHT;
+    // "VK_186" 这种写法：KeyName 对没有友好名字的键（标点、小键盘等）就这么写回配置，
+    // 这里必须能原样认回来，否则界面里录得到的热键，下次启动反而解析失败。
+    if (k.size() > 3 && k.compare(0, 3, L"vk_") == 0) {
+        wchar_t* end = nullptr;
+        const unsigned long n = wcstoul(k.c_str() + 3, &end, 10);
+        if (end && *end == L'\0' && end != k.c_str() + 3 && n > 0 && n < 256) {
+            return static_cast<UINT>(n);
+        }
+    }
     return 0;
 }
 
@@ -168,20 +178,28 @@ HotkeyRegistration::~HotkeyRegistration() {
 
 void HotkeyRegistration::Clear() {
     if (active_ && hwnd_) {
-        UnregisterHotKey(hwnd_, kId);
+        UnregisterHotKey(hwnd_, id_);
     }
     active_ = false;
 }
 
 bool HotkeyRegistration::Apply(HWND hwnd, const HotkeySpec& spec) {
-    Clear();
-    hwnd_ = hwnd;
+    if (active_ && hwnd_ == hwnd && current_.modifiers == spec.modifiers &&
+        current_.vk == spec.vk) {
+        return true;  // 同一个组合键已经挂着；再注册一次反而会因"已被占用"失败
+    }
+    // **先挂新的、成功了再摘旧的。** 反过来的话，新组合键被占用时旧的已经注销，
+    // 用户手里一个能用的热键都不剩。两个 id 轮换使用，新旧可以短暂并存。
+    const int newId = (active_ && id_ == kIdA) ? kIdB : kIdA;
     // MOD_NOREPEAT：按住不放只触发一次，避免长按刷屏。
-    if (!RegisterHotKey(hwnd, kId, spec.modifiers | MOD_NOREPEAT, spec.vk)) {
+    if (!RegisterHotKey(hwnd, newId, spec.modifiers | MOD_NOREPEAT, spec.vk)) {
         LogF(L"注册热键 %s 失败（错误码 %lu），多半已被其他程序占用",
              FormatHotkey(spec).c_str(), GetLastError());
-        return false;
+        return false;  // 旧热键（如果有）保持不动
     }
+    Clear();
+    hwnd_ = hwnd;
+    id_ = newId;
     current_ = spec;
     active_ = true;
     LogF(L"热键 %s 已注册，后台监听中", FormatHotkey(spec).c_str());

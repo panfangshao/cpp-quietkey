@@ -104,7 +104,12 @@ bool ResolveTarget(const TargetSpec& spec, ResolvedTarget* out) {
     out->hwnd = best->hwnd;
     out->title = best->title;
     out->exe = best->exe;
+    out->className = best->className;
     return true;
+}
+
+bool IsChromiumWindowClass(const std::wstring& className) {
+    return className.compare(0, 16, L"Chrome_WidgetWin") == 0;
 }
 
 HWND GetForegroundHwnd() {
@@ -141,12 +146,66 @@ bool ForceForeground(HWND hwnd) {
     return ok || GetForegroundWindow() == hwnd;
 }
 
+namespace {
+
+// 左右分开查：抬起时要发对应的那一个，右侧的 Ctrl/Alt 和两个 Win 键是扩展键。
+struct ModifierKey {
+    UINT vk;
+    bool extended;
+};
+constexpr ModifierKey kModifierKeys[] = {
+    {VK_LSHIFT, false}, {VK_RSHIFT, false}, {VK_LCONTROL, false}, {VK_RCONTROL, true},
+    {VK_LMENU, false},  {VK_RMENU, true},   {VK_LWIN, true},      {VK_RWIN, true},
+};
+
+bool IsDown(UINT vk) {
+    return (GetAsyncKeyState(static_cast<int>(vk)) & 0x8000) != 0;
+}
+
+INPUT KeyInput(UINT vk, DWORD flags) {
+    INPUT in{};
+    in.type = INPUT_KEYBOARD;
+    in.ki.wVk = static_cast<WORD>(vk);
+    in.ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
+    in.ki.dwFlags = flags;
+    return in;
+}
+
+}  // namespace
+
+bool WaitModifiersReleased(unsigned timeoutMs) {
+    const ULONGLONG deadline = GetTickCount64() + timeoutMs;
+    for (;;) {
+        bool any = false;
+        for (const ModifierKey& m : kModifierKeys) {
+            any = any || IsDown(m.vk);
+        }
+        if (!any) {
+            return true;
+        }
+        if (GetTickCount64() >= deadline) {
+            return false;
+        }
+        Sleep(10);
+    }
+}
+
 bool SendKeyToForeground(UINT vk) {
-    INPUT in[2] = {};
-    in[0].type = INPUT_KEYBOARD;
-    in[0].ki.wVk = static_cast<WORD>(vk);
-    in[0].ki.wScan = static_cast<WORD>(MapVirtualKeyW(vk, MAPVK_VK_TO_VSC));
-    in[1] = in[0];
-    in[1].ki.dwFlags = KEYEVENTF_KEYUP;
-    return SendInput(2, in, sizeof(INPUT)) == 2;
+    std::vector<INPUT> in;
+    bool releasing = false;
+    for (const ModifierKey& m : kModifierKeys) {
+        if (!IsDown(m.vk)) continue;
+        if (!releasing) {
+            // 单独抬起 Alt 会激活菜单栏、单独抬起 Win 会弹开始菜单。
+            // 先插一个未分配的键码（0xE8）"打断"它，这是 AutoHotkey 等工具的通行做法。
+            in.push_back(KeyInput(0xE8, 0));
+            in.push_back(KeyInput(0xE8, KEYEVENTF_KEYUP));
+            releasing = true;
+        }
+        in.push_back(KeyInput(m.vk, KEYEVENTF_KEYUP | (m.extended ? KEYEVENTF_EXTENDEDKEY : 0)));
+    }
+    in.push_back(KeyInput(vk, 0));
+    in.push_back(KeyInput(vk, KEYEVENTF_KEYUP));
+    const UINT n = static_cast<UINT>(in.size());
+    return SendInput(n, in.data(), sizeof(INPUT)) == n;
 }

@@ -18,6 +18,9 @@ endif()
 # 不用在仓库里维护二进制资源文件，改图案只改那一个 .cpp。
 # ---------------------------------------------------------------------------
 add_executable(make_icon tools/make_icon.cpp)
+# 源码里有中文注释，不加 /utf-8 的话中文系统（代码页 936）会把 UTF-8 字节当 GBK 读，
+# 注释吞掉换行，整个文件编译不过。
+target_compile_options(make_icon PRIVATE /utf-8)
 set(QUIETKEY_ICON "${CMAKE_CURRENT_BINARY_DIR}/quietkey.ico")
 add_custom_command(
     OUTPUT "${QUIETKEY_ICON}"
@@ -63,5 +66,22 @@ set_target_properties(quietkey PROPERTIES LINK_FLAGS "/MANIFEST:NO")
 # WindowsApp.lib 是 C++/WinRT（媒体会话那一层）要的。
 target_link_libraries(quietkey PRIVATE comctl32 shlwapi dwmapi windowsapp)
 
-#CMake版编译会把C++运行时甩给了系统DLL，加上这条禁止这么做，但是体积稍微大100多KB
-set_property(TARGET quietkey PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded")
+# 静态链接 C++ 运行时：拷到没装 VC++ 可再发行组件的机器上也能直接跑，代价是体积大 100 多 KB。
+# Debug 配置用调试版 CRT（/MTd），否则 _DEBUG 断言、堆检查全部失效。
+set_property(TARGET quietkey PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
+# ---------------------------------------------------------------------------
+# 单元测试：只覆盖纯函数（热键字符串互转、最近活跃判定），不碰系统状态。
+# 跑法：build\quietkey_tests.exe，或 ctest --test-dir build
+# ---------------------------------------------------------------------------
+enable_testing()
+add_executable(quietkey_tests
+    tests/test_main.cpp
+    src/hotkey.cpp
+    src/recency.cpp
+    src/log.cpp)
+target_include_directories(quietkey_tests PRIVATE src)
+target_compile_definitions(quietkey_tests PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
+target_compile_options(quietkey_tests PRIVATE /utf-8 /W4)
+set_property(TARGET quietkey_tests PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+add_test(NAME quietkey_tests COMMAND quietkey_tests)

@@ -10,6 +10,7 @@
 // 另一个坑：不要用"自动挑选编码方式"的做法把小尺寸也压成 PNG。
 // 小尺寸的 PNG 条目在部分 shell 路径下读不出来，图标会变空白。
 
+#include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>

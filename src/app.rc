@@ -22,6 +22,9 @@ IDI_APP ICON "quietkey.ico"
 // ---------------------------------------------------------------------------
 IDD_SETTINGS DIALOGEX 0, 0, 384, 366
 STYLE DS_SETFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX
+// owner 是隐藏的主窗口，被拥有的窗口默认没有任务栏按钮——一最小化就"丢"到桌面左下角。
+// WS_EX_APPWINDOW 强制给它一个任务栏按钮。
+EXSTYLE WS_EX_APPWINDOW
 CAPTION "quietkey 设置"
 FONT 9, "Microsoft YaHei UI", 400, 0, 0x86
 BEGIN
